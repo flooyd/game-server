@@ -1,24 +1,23 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug,  PartialEq, Clone)]
 enum Message {
     Move {
         player_id: Uuid,
-        direction: String,
+        x: f32,
+        y: f32,
     },
     PlayerMap {
         player_map: HashMap<String, PlayerMapPlayer>,
     },
     Disconnect {
         player_id: Uuid,
-        player_map: HashMap<String, PlayerMapPlayer>,
     },
     Connect {
         player_id: Uuid,
@@ -73,11 +72,14 @@ async fn main() -> tokio::io::Result<()> {
         let player_id = Uuid::new_v4();
         let player = PlayerMapPlayer {
             player_id,
-            x: 10.0,
-            y: 10.0,
+            
+            //random from 0 to 400
+            x: rand::random::<f32>() * 400.0,
+            y: rand::random::<f32>() * 400.0,
             width: 10.0,
             height: 10.0,
-            color: [0.0, 0.0, 0.0, 1.0],
+            //random color
+            color: [rand::random::<f32>(), rand::random::<f32>(), rand::random::<f32>(), 1.0],
         };
 
         // Add player to the player map
@@ -142,12 +144,11 @@ async fn handle_client(
     player_map: Arc<Mutex<HashMap<String, PlayerMapPlayer>>>,
     mut rx: mpsc::UnboundedReceiver<Message>,
 ) {
-    let mut read_buffer = [0u8; 1024];
+    let mut read_buffer = [0u8; 8192];
 
     // Clone references for the tasks
     let clients_read_task = Arc::clone(&clients);
     let player_map_read_task = Arc::clone(&player_map);
-    let clients_write_task = Arc::clone(&clients);
 
     // Task to read messages from the client (optional for your use case)
     let addr_clone = addr.clone();
@@ -160,11 +161,9 @@ async fn handle_client(
                     break;
                 }
                 Ok(_n) => {
-                    println!("Received message from client: {}", addr_clone);
                     let message_str = String::from_utf8_lossy(&read_buffer).trim_end_matches(char::from(0)).to_string();
                     let message: Message = serde_json::from_str(&message_str).unwrap();
                     match message {
-
                         Message::GetPlayerMap => {
                             let player_map_message = Message::PlayerMap {
                                 player_map: player_map_read_task.lock().unwrap().clone(),
@@ -173,8 +172,18 @@ async fn handle_client(
                                 eprintln!("Failed to send player map to client {}: {}", addr_clone, e);
                             }
                         }
+                        Message::Move { player_id, x, y } => {
+                            let mut player_map_lock = player_map_read_task.lock().unwrap();
+                            let player = player_map_lock.get_mut(&addr_clone).unwrap();
+                            player.x = x;
+                            player.y = y;
+
+                            let move_message = Message::Move { player_id, x, y };
+                            broadcast_message(&clients_read_task, &addr_clone, move_message);
+                        }
                         _ => (),
                     }
+                    read_buffer.fill(0);
                 }
                 Err(e) => {
                     eprintln!("Failed to read from socket {}: {}", addr_clone, e);
@@ -213,7 +222,6 @@ async fn handle_client(
     // Broadcast the updated player map to remaining clients
     let disconnect_message = Message::Disconnect {
         player_id,
-        player_map: player_map.lock().unwrap().clone(),
     };
 
     broadcast_message(&clients_clone, &addr, disconnect_message);
