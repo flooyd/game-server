@@ -22,7 +22,11 @@ enum Message {
     },
     Connect {
         player_id: Uuid,
-    }
+    },
+    OtherPlayerConnected {
+        player: PlayerMapPlayer,
+    },
+    GetPlayerMap,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -37,12 +41,16 @@ struct PlayerMapPlayer {
 
 impl PartialEq for PlayerMapPlayer {
     fn eq(&self, other: &Self) -> bool {
-        self.player_id == other.player_id &&
-        self.x.to_bits() == other.x.to_bits() &&
-        self.y.to_bits() == other.y.to_bits() &&
-        self.width.to_bits() == other.width.to_bits() &&
-        self.height.to_bits() == other.height.to_bits() &&
-        self.color.iter().zip(other.color.iter()).all(|(a, b)| a.to_bits() == b.to_bits())
+        self.player_id == other.player_id
+            && self.x.to_bits() == other.x.to_bits()
+            && self.y.to_bits() == other.y.to_bits()
+            && self.width.to_bits() == other.width.to_bits()
+            && self.height.to_bits() == other.height.to_bits()
+            && self
+                .color
+                .iter()
+                .zip(other.color.iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits())
     }
 }
 
@@ -84,17 +92,12 @@ async fn main() -> tokio::io::Result<()> {
         // Add the sender to the clients map
         clients.lock().unwrap().insert(addr_str.clone(), tx.clone());
 
-        // Send the initial player map to the new client
-        let initial_message = Message::Connect {
-            player_id,
-        };
+        // Send the player_id to the new client
+        let initial_message = Message::Connect { player_id };
         tx.send(initial_message).unwrap();
 
-        // Broadcast the new player to all other clients
-        let new_player_message = Message::PlayerMap {
-            player_map: player_map.lock().unwrap().clone(),
-        };
-        broadcast_message(&clients, &addr_str, new_player_message);
+        let other_player_connected_message = Message::OtherPlayerConnected { player };
+        broadcast_message(&clients, &addr_str, other_player_connected_message);
 
         // Clone references for the task
         let clients_clone = Arc::clone(&clients);
@@ -141,6 +144,11 @@ async fn handle_client(
 ) {
     let mut read_buffer = [0u8; 1024];
 
+    // Clone references for the tasks
+    let clients_read_task = Arc::clone(&clients);
+    let player_map_read_task = Arc::clone(&player_map);
+    let clients_write_task = Arc::clone(&clients);
+
     // Task to read messages from the client (optional for your use case)
     let addr_clone = addr.clone();
     let read_task = tokio::spawn(async move {
@@ -152,8 +160,21 @@ async fn handle_client(
                     break;
                 }
                 Ok(_n) => {
-                    // Handle incoming messages if needed
-                    // For now, we don't process client messages
+                    println!("Received message from client: {}", addr_clone);
+                    let message_str = String::from_utf8_lossy(&read_buffer).trim_end_matches(char::from(0)).to_string();
+                    let message: Message = serde_json::from_str(&message_str).unwrap();
+                    match message {
+
+                        Message::GetPlayerMap => {
+                            let player_map_message = Message::PlayerMap {
+                                player_map: player_map_read_task.lock().unwrap().clone(),
+                            };
+                            if let Err(e) = clients_read_task.lock().unwrap().get(&addr_clone).unwrap().send(player_map_message) {
+                                eprintln!("Failed to send player map to client {}: {}", addr_clone, e);
+                            }
+                        }
+                        _ => (),
+                    }
                 }
                 Err(e) => {
                     eprintln!("Failed to read from socket {}: {}", addr_clone, e);
@@ -181,10 +202,12 @@ async fn handle_client(
         _ = write_task => (),
     }
 
-    let player_id = player_map.lock().unwrap().get(&addr).unwrap().player_id;
+    let clients_clone = Arc::clone(&clients);
+    let player_map_clone = Arc::clone(&player_map);
+    let player_id = player_map_clone.lock().unwrap().get(&addr).unwrap().player_id;
 
     // Clean up after client disconnects
-    clients.lock().unwrap().remove(&addr);
+    clients_clone.lock().unwrap().remove(&addr);
     player_map.lock().unwrap().remove(&addr);
     println!("Broadcasting disconnect message");
     // Broadcast the updated player map to remaining clients
@@ -192,8 +215,8 @@ async fn handle_client(
         player_id,
         player_map: player_map.lock().unwrap().clone(),
     };
-    
-    broadcast_message(&clients, &addr, disconnect_message);
+
+    broadcast_message(&clients_clone, &addr, disconnect_message);
 
     println!("Cleaned up client: {}", addr);
 }
